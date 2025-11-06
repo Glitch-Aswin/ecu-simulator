@@ -16,7 +16,7 @@ from can.bus import BusState
 
 # TCP Server for inter-process communication on Windows
 TCP_HOST = '127.0.0.1'
-TCP_PORT = 55555
+TCP_PORT = 55554
 
 client_sockets = []
 server_socket = None
