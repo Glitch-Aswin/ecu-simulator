@@ -157,33 +157,56 @@ def service1(bus, msg):
 
 
 def service3(bus, msg):
-    """Service 0x03 - Read stored DTCs"""
-    log.debug(">> Service 03: Read DTCs")
-    
-    if len(active_dtcs) == 0:
-        # No DTCs stored
+    """Service 0x03 - Read stored DTCs (supports multi-frame responses).
+
+    Returns a list of can.Message frames (one or more). Each frame will contain
+    up to three DTCs (6 bytes) following the 0x43 response code. Frames are
+    padded with zeros when needed.
+    """
+    log.debug(">> Service 03: Read DTCs (multi-frame)")
+
+    frames = []
+
+    # Snapshot active DTCs at time of request so rapid changes don't affect
+    # the frames being sent for this request.
+    dtc_snapshot = list(active_dtcs)
+
+    if len(dtc_snapshot) == 0:
+        # No DTCs stored - single terminator frame
         response = can.Message(arbitration_id=0x7e8,
           data=[0x01, 0x43, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
           is_extended_id=False)
-    else:
-        # Send DTCs (max 3 per message)
-        num_dtcs = len(active_dtcs)
-        dtc_data = [0x43]  # Service response
-        
-        for dtc in active_dtcs[:3]:  # Max 3 DTCs per message
-            dtc_data.append(dtc[0])
-            dtc_data.append(dtc[1])
-        
-        # Pad with zeros
-        while len(dtc_data) < 8:
-            dtc_data.append(0x00)
-        
+        frames.append(response)
+        return frames
+
+    # Chunk into groups of 3 DTCs (6 bytes) per frame
+    for i in range(0, len(dtc_snapshot), 3):
+        chunk = dtc_snapshot[i:i+3]
+        # Build payload bytes after the length byte
+        payload = [0x43]
+        for dtc in chunk:
+            payload.append(dtc[0])
+            payload.append(dtc[1])
+
+        # Pad payload to 7 bytes (we will prefix with length byte to make 8)
+        while len(payload) < 7:
+            payload.append(0x00)
+
+        # First byte of CAN data in this codebase is currently used as a length
+        # indicator in some messages. Keep backwards compatibility by using
+        # (len(payload)-1) as the first byte, followed by the payload.
+        frame_data = [len(payload)-1] + payload
+
+        # Ensure frame_data is exactly 8 bytes
+        while len(frame_data) < 8:
+            frame_data.append(0x00)
+
         response = can.Message(arbitration_id=0x7e8,
-          data=[len(dtc_data)-1] + dtc_data,
+          data=frame_data,
           is_extended_id=False)
-    
-    bus.send(response)
-    return response
+        frames.append(response)
+
+    return frames
 
 
 def service4(bus, msg):
@@ -254,9 +277,17 @@ def receive_all():
                     if response:
                         broadcast_can_message(response)
                 elif msg.arbitration_id == 0x7df and msg.data[1] == 0x03:
-                    response = service3(bus, msg)
-                    if response:
-                        broadcast_can_message(response)
+                    # Multi-frame DTC response
+                    responses = service3(bus, msg)
+                    for r in responses:
+                        # send locally and broadcast each frame
+                        try:
+                            bus.send(r)
+                        except Exception:
+                            pass
+                        broadcast_can_message(r)
+                        # small spacing so clients can collect frames reliably
+                        time.sleep(0.05)
                 elif msg.arbitration_id == 0x7df and msg.data[1] == 0x04:
                     response = service4(bus, msg)
                     if response:
@@ -274,9 +305,14 @@ def receive_all():
                         if response:
                             broadcast_can_message(response)
                     elif msg.arbitration_id == 0x7df and msg.data[1] == 0x03:
-                        response = service3(bus, msg)
-                        if response:
-                            broadcast_can_message(response)
+                        responses = service3(bus, msg)
+                        for r in responses:
+                            try:
+                                bus.send(r)
+                            except Exception:
+                                pass
+                            broadcast_can_message(r)
+                            time.sleep(0.05)
                     elif msg.arbitration_id == 0x7df and msg.data[1] == 0x04:
                         response = service4(bus, msg)
                         if response:

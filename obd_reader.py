@@ -16,7 +16,7 @@ import threading
 
 # TCP connection to ECU simulator
 TCP_HOST = '127.0.0.1'
-TCP_PORT = 55555
+TCP_PORT = 55554
 
 class OBDReader:
     """OBD-II diagnostic reader"""
@@ -100,6 +100,22 @@ class OBDReader:
                         return msg
             time.sleep(0.01)
         return None
+
+    def collect_responses(self, timeout=0.6):
+        """Collect multiple responses from the ECU within a timeout window.
+
+        Returns a list of can.Message objects received from the ECU response ID.
+        """
+        end_time = time.time() + timeout
+        collected = []
+        while time.time() < end_time:
+            resp = self.wait_response(timeout=0.1)
+            if resp:
+                collected.append(resp)
+            else:
+                # no message in this short interval; continue until overall timeout
+                continue
+        return collected
     
     def read_rpm(self):
         """Read engine RPM (PID 0x0C)"""
@@ -184,20 +200,26 @@ class OBDReader:
         except:
             return []
         
-        response = self.wait_response()
-        
-        if response and response.data[1] == 0x43:
-            dtcs = []
-            # Parse DTCs (2 bytes each)
-            for i in range(2, len(response.data)-1, 2):
-                if response.data[i] != 0x00:
-                    dtc_high = response.data[i]
-                    dtc_low = response.data[i+1]
-                    # Format as P-code (powertrain)
-                    dtc_str = f"P{dtc_high:02X}{dtc_low:02X}"
-                    dtcs.append(dtc_str)
-            return dtcs
-        return []
+        # Collect multiple frames that may be sent for the full DTC set
+        frames = self.collect_responses(timeout=0.6)
+
+        dtcs = []
+        for response in frames:
+            if not response or len(response.data) < 3:
+                continue
+            if response.data[1] == 0x43:
+                # parse pairs starting at index 2
+                i = 2
+                while i + 1 < len(response.data):
+                    hi = response.data[i]
+                    lo = response.data[i+1]
+                    if hi == 0x00 and lo == 0x00:
+                        break
+                    dtc_str = f"P{hi:02X}{lo:02X}"
+                    if dtc_str not in dtcs:
+                        dtcs.append(dtc_str)
+                    i += 2
+        return dtcs
     
     def clear_dtcs(self):
         """Clear all Diagnostic Trouble Codes (Service 0x04)"""
